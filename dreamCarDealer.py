@@ -5,7 +5,7 @@
 from email.mime import text
 import json
 from requests import Session
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse, parse_qs
 from bs4 import BeautifulSoup
 from re import search
 from datetime import datetime, timedelta
@@ -14,7 +14,8 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from json import load, dump
 from os.path import dirname, realpath, join, isfile
-from time import sleep
+from time import time, sleep
+from msvcrt import kbhit, getch
 
 # globalne konstante
 from GLOBALS.URLsAndQueryParams import BASE_URL, ADS_SUB_SITE, URL_PARAMS
@@ -22,21 +23,40 @@ from GLOBALS.extraCarQueryParameters import suitableParameters
 from GLOBALS.terminalColors import termColors
 from secrets import MAIL_ACCOUNT_NAME, MAIL_ACCOUNT_PASSWORD, MAIL_SEND_TO
 
-SAVED_DATA_PATH = join(realpath(dirname(__file__)), "STORAGE", "savedData.txt")
+STORAGE_FOLDER_PATH = join(realpath(dirname(__file__)), "STORAGE")
+SAVED_DATA_PATH = join(STORAGE_FOLDER_PATH, "savedDataConfig.txt")
 DATETIME_FORMAT = "%d.%m.%Y %H:%M:%S"
 SLEEP_TIME_BETWEEN_ADS = 0.075 # [s] premor med pridobivanjem oglasov, da spletna stran ne dobi "robotoziranega obcutka"
+TIME_WAIT_FOR_USER_INPUT = 7.0 # [s] cas, dokler programa caka na userjev input in blokira
 
 # časovni razpon, ki me zanima za oglase
 lastDate = datetime.now() - timedelta(days=14)
-# ID zadnjega oglasa
+# ID zadnjega oglasa (prebrano iz fila)
 lastAdID = -1
+# ID trenutno najnovejsega oglasa
+firstAdID = -1
+# stevilka oglasa (po vrsti)
+adNumber = 1
 # seja za HTTP zahtevke
 session = Session()
 session.headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 
+# funkcija, vrne true, ce je user v dolocenem casu kliknil tipko, false sicer
+def waitAndReturnUserInput():
+    startTime = endTime = time()
+    print(f"{termColors.OKCYAN }Pritisni tipko za test mode (email se ne bo poslal, podatki iskanja ne bodo shranjeni)\n{termColors.ENDC}")
+
+    while endTime - startTime < TIME_WAIT_FOR_USER_INPUT:
+        if kbhit():
+            print(f"{termColors.OKCYAN }Test mode aktiviran!\n{termColors.ENDC}")
+            return True
+        endTime = time()
+        
+    return False
+
 # funkcija, preberi podatke o zadnjem datumu in ID oglasu (ce obstaja)
 def readSavedDataFromJSON():
-    # global, da jih lahko assignas v funkciji
+    # global, da se vrednost shrani v globalno spremenljivko in ne lokalno
     global lastDate
     global lastAdID
 
@@ -47,13 +67,20 @@ def readSavedDataFromJSON():
             lastAdID = dataJSON["id"]
 
 # funkcija, preberi podatke o zadnjem datumu in ID oglasu
-def writeSavedDataFromJSON():
+def writeSavedDataToJSON():
     with open(SAVED_DATA_PATH, "w") as f:
             dataJSON = {
                 "date": lastDate.strftime(DATETIME_FORMAT),
-                "id": lastAdID
+                "id": firstAdID
             }
             dump(dataJSON, f)
+
+def writeAdsToFile(data):
+    fileName = str(lastDate.day) + "-" + str(lastDate.month) + "-" + str(lastDate.year) + "_" + str(lastDate.hour) + "-" + str(lastDate.minute) 
+    filePath = join(STORAGE_FOLDER_PATH, fileName)
+
+    with open(filePath, "w+") as f:
+        f.write(data)
 
 # funkcija pošlje mail z rezultati
 def sendMail(msg, subject="Avto oglasi"):
@@ -126,6 +153,10 @@ def getSoupObjectFromURL(_urlSubSite="", _params=None):
 
 # funkcija ki obdela vse oglase v adList
 def processAds(adList, myAdsStr):
+    # global, da se vrednost shrani v globalno spremenljivko in ne lokalno
+    global firstAdID
+    global adNumber
+
     for ad in adList:
         if ad.find("div", class_="GO-Results-Top-Photo") != None: # če najde ta div je iz topAd-a (in to me ne zanima, tak da preskoči)
             continue
@@ -146,6 +177,11 @@ def processAds(adList, myAdsStr):
         siteDate = datetime.strptime(dateString_digitsOnly, "%d.%m.%Y %H:%M:%S")
         
         # ustreznosti kriterijem
+        parsedURL = urlparse(subUrl)
+        adID = parse_qs(parsedURL.query)["id"][0]
+        if lastAdID == adID: # preveri, ce je oglas s tem ID ze bil obdelan v prejsnjih zagonih programa
+            return False, myAdsStr # vrne false
+
         if siteDate < lastDate: # preveri če datum ni prestar (če je se konča iskanje oglasov in returna iz funkcije)
             return False, myAdsStr # vrne false, ker tukaj pride ne pride do konca oglasov, a so datumi že prestari
 
@@ -155,13 +191,23 @@ def processAds(adList, myAdsStr):
         if not isFuelTypeSuitable(htmlAd.find_all("table")[0]): # pogoj tipa motorja (* prvi <table> tag je tabela, ki jo rabim)
             continue
         
+        # shrani ID cisto prvega oglasa
+        if firstAdID == -1:
+            firstAdID = adID
+
          # dodaj link oglasa v string (ustreza vsem kriterijem)
-        myAdsStr += (htmlAd.title.text + "\n" + BASE_URL + subUrl + "\n\n")
+        myAdsStr += (str(adNumber)+ ". " + htmlAd.title.text.split(":", 1)[0] + "\n" + BASE_URL + subUrl + "\n\n")
+
+        # inkrementiraj stevilko oglasa
+        adNumber += 1
 
     return True, myAdsStr # vrne true, vsi oglasi so datumsko ustrezni(tako da se iskanje nadaljuje)
 
 # funkcija ki naredi in pridobi poizvedbo nad oglasi
 def searchForAds():
+    # global, da se vrednost shrani v globalno spremenljivko in ne lokalno
+    global lastDate
+
     currTime = datetime.now()
     acceptableAdsStr = ""
 
@@ -196,28 +242,36 @@ def searchForAds():
         currentPageNumber += 1
         URL_PARAMS["stran"] += currentPageNumber
 
-    # shrani cas
-    global lastDate # global, da se vrednost shrani v globalno spremenljivko in ne lokalno
+    # shrani cas 
     lastDate = currTime
 
-    if acceptableAdsStr == "":
-        # ni zadetkov
-        print("Ni novih oglasov...")
-
-    else:
-        # pošlji izbrane oglasi na mail
-        sendMail("Ugodni avtomobilski oglasi za datum " + currTime.strftime(DATETIME_FORMAT) + "\n\n" + acceptableAdsStr) 
-        print(acceptableAdsStr)
-
+    return acceptableAdsStr, currTime
+    
 
 if __name__ == "__main__":
     print("\n")
 
+    # uporabnik lahko s pritiskom tipke aktivira testni nacin (email se ne poslje, podatki se ne shranijo)
+    isTestModeActivated = waitAndReturnUserInput()
+
     # preberi zadnji datum in id iz file-a
     readSavedDataFromJSON()
     # zacni "algoritem iskanja in procesiranja oglasov" in poslji mail
-    searchForAds()
+    acceptableAdsStr, currTime = searchForAds()
+
+    if acceptableAdsStr == "":
+        # ni zadetkov
+        print("Ni novih oglasov...")
+    else:
+        print(acceptableAdsStr)
+        if not isTestModeActivated:
+            # pošlji izbrane oglase na mail
+            sendMail("Ugodni avtomobilski oglasi za datum " + currTime.strftime(DATETIME_FORMAT) + "\n\n" + acceptableAdsStr)
+            # shrani oglase v file
+            writeAdsToFile(acceptableAdsStr)
+
     # zapisi zadnji datum in id v file
-    writeSavedDataFromJSON()
+    if not isTestModeActivated:
+        writeSavedDataToJSON()
 
     print(f"{termColors.OKCYAN }Program se je zaključil\n{termColors.ENDC}")
