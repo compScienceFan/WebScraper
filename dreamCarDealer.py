@@ -27,7 +27,7 @@ DATETIME_FORMAT = "%d.%m.%Y %H:%M:%S"
 SLEEP_TIME_BETWEEN_ADS = 0.075 # [s] premor med pridobivanjem oglasov, da spletna stran ne dobi "robotoziranega obcutka"
 
 # časovni razpon, ki me zanima za oglase
-lastDate = datetime.now() - timedelta(days=2)
+lastDate = datetime.now() - timedelta(days=14)
 # ID zadnjega oglasa
 lastAdID = -1
 # seja za HTTP zahtevke
@@ -182,7 +182,8 @@ def searchForAds():
             page = soupObj.find_all("ul", id= "GO-naviprevnext")[1] # za več strani
             if page != None:
                 pageList = page.find_all("li", class_= "page-item") # vse strani
-                maxPageNumber = len(pageList) - 3 # vse strani - naprej/nazaj elementa
+                numOfPages = len(pageList) - 2 # stevilo strani je enako vsem "li" znackam minus 2 (za naprej/nazaj)
+                maxPageNumber = min(numOfPages, 10) # omeji se na max 10 strani
 
         # seznam oglasov
         if adsContainer != None:
